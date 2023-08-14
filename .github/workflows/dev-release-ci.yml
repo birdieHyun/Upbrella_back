@@ -1,15 +1,16 @@
-name: Upbrella DEV CI
+name: Java CI with Gradle
 
 on:
   push:
-    branches: [ "release-dev" ]
+    branches: [ "release-be" ]
+
 
 env:
-  WORKING_DIRECTORY: ./
-  DOCKERFILE_DIRECTORY: ./.github/workflows
-  CODE_DEPLOY_APPLICATION_NAME: upbrella-dev-deploy
-  CODE_DEPLOY_DEPLOYMENT_GROUP_NAME: UpbrellaServerDev
-  S3_BUCKET_NAME: upbrella-storage
+  working-directory: ./
+  ECR_REPOSITORY: upbrella-ecr
+  ECS_SERVICE: upbrella-server
+  ECS_CLUSTER: upbrella-cluster
+  CONTAINER_NAME: upbrella-server
 
 permissions:
   contents: read
@@ -19,47 +20,59 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
-    - name: checkout
-      uses: actions/checkout@v3
+      - name: checkout
+        uses: actions/checkout@v3
 
-    - name: Set up JDK 11
-      uses: actions/setup-java@v3
-      with:
-        java-version: '11'
-        distribution: 'adopt'
+      - name: Set up JDK 11
+        uses: actions/setup-java@v3
+        with:
+          java-version: '11'
+          distribution: 'adopt'
 
-    - name: Set application properties
-      run: |
-        touch src/main/resources/application.properties
-        echo "${{ secrets.APPLICATION_PROPERTIES_DEV }}" > src/main/resources/application.properties
-     
-    - name: Build with Gradle
-      run: |
-        chmod +x gradlew
-        ./gradlew clean build
-      env:
-        WORKING_DIRECTORY: ${{ env.WORKING_DIRECTORY }}
-
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v1
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }} 
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }} 
-        aws-region: ${{ secrets.AWS_REGION }} 
-
-    - name: Make zip file
-      run: zip -r ./$GITHUB_SHA.zip .
-      shell: bash
+      - uses: actions/checkout@v3
+      - run: touch ./src/main/resources/application.properties
+      - run: echo "${{ secrets.APPLICATION_PROPERTIES }}" > ./src/main/resources/application.properties
 
 
-    - name: Upload to S3
-      run:
-        aws s3 cp $GITHUB_SHA.zip s3://${{ env.S3_BUCKET_NAME }}/server-dev-deploy/$GITHUB_SHA.zip --region ${{ secrets.AWS_REGION }}
+      - name: Build with Gradle
+        run: |
+          chmod +x gradlew
+          ./gradlew clean build
+        working-directory: ${{ env.working-directory }}
 
-    - name: Code Deploy
-      run: | 
-        aws deploy create-deployment \
-        --deployment-config-name CodeDeployDefault.AllAtOnce \
-        --application-name ${{ env.CODE_DEPLOY_APPLICATION_NAME }} \
-        --deployment-group-name ${{ env.CODE_DEPLOY_DEPLOYMENT_GROUP_NAME }} \
-        --s3-location bucket=${{ env.S3_BUCKET_NAME }},bundleType=zip,key=server-dev-deploy/$GITHUB_SHA.zip
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+            aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+            aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: docker build and push
+        run: |
+          sudo aws ecr get-login-password --region ap-northeast-2 | docker login --username AWS --password-stdin 641876149891.dkr.ecr.ap-northeast-2.amazonaws.com
+          sudo docker build -t upbrella-ecr .
+          sudo docker tag upbrella-ecr:latest 641876149891.dkr.ecr.ap-northeast-2.amazonaws.com/upbrella-ecr:latest
+          sudo docker push 641876149891.dkr.ecr.ap-northeast-2.amazonaws.com/upbrella-ecr:latest
+
+      - name: Get latest ECS task definition
+        id: get-latest-task-def
+        run: |
+          TASK_DEF=$(aws ecs describe-services --cluster ${ECS_CLUSTER} --services ${ECS_SERVICE} --region ${AWS_REGION} --query "services[0].taskDefinition" --output text)
+          aws ecs describe-task-definition --task-definition $TASK_DEF --region ${AWS_REGION} --query "taskDefinition" --output json > task-definition.json
+          echo "TASK_DEF_JSON=$(pwd)/task-definition.json" >> $GITHUB_ENV
+
+      - name: Fill in the new image ID in the Amazon ECS task definition
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ env.TASK_DEF_JSON }}
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.build-image.outputs.image }}
+
+      - name: Deploy Amazon ECS task definition
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
