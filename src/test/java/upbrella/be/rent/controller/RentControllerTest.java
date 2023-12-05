@@ -167,7 +167,7 @@ class RentControllerTest extends RestDocsSupport {
                                 fieldWithPath("rentStoreName").type(JsonFieldType.STRING)
                                         .description("대여 지점"),
                                 fieldWithPath("storeId").type(JsonFieldType.NUMBER)
-                                        .description("대여 지점 번호")
+                                        .description("반납 지점 번호")
                         )));
     }
 
